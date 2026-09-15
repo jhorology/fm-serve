@@ -1,0 +1,29 @@
+[project]
+name = "fm-serve"
+version = "0.1.0"
+description = "Always-on Apple Foundation Models (fm serve) with launchd + API keepalive"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.28.1",
+    "rich>=13.0.0",
+    "uvicorn>=0.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.28.1",
+]
+
+[project.scripts]
+fm-serve = "fm_serve:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
