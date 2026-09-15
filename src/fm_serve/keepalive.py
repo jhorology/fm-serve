@@ -21,6 +21,11 @@ console = Console()
 class KeepAliveManager:
     """Manages macOS power assertions to prevent system sleep with idle timeout."""
 
+    _cf_str_fn: Any
+    _cf_release_fn: Any
+    _create_fn: Any
+    _release_fn: Any
+
     def __init__(self, timeout_sec: float = 3600.0, enabled: bool = True):
         self.timeout_sec: float = float(timeout_sec)
         self.enabled: bool = enabled and (platform.system() == "Darwin")
@@ -64,6 +69,10 @@ class KeepAliveManager:
             self._release_fn = self._iokit.IOPMAssertionRelease
             self._release_fn.argtypes = [ctypes.c_uint32]
             self._release_fn.restype = ctypes.c_int
+
+            self._cf_release_fn = self._cf.CFRelease
+            self._cf_release_fn.argtypes = [ctypes.c_void_p]
+            self._cf_release_fn.restype = None
         except Exception as e:
             console.print(
                 f"[dim yellow]⚠ IOKit power assertion 初期化失敗 (スリープ抑制無効): {e}[/dim yellow]"
@@ -74,6 +83,11 @@ class KeepAliveManager:
         if not self._cf_str_fn:
             return None
         return self._cf_str_fn(None, string.encode("utf-8"), 0x08000100)
+
+    def _cf_release(self, ref: Any) -> None:
+        """CFString を解放 (Create Rule: 呼び出し側が所有権を持つ)。"""
+        if ref is not None and self._cf_release_fn is not None:
+            self._cf_release_fn(ref)
 
     @property
     def is_active(self) -> bool:
@@ -102,14 +116,18 @@ class KeepAliveManager:
         name_ref = self._cf_str("fm-serve API keepalive")
 
         success_ids = []
-        for atype in assertion_types:
-            type_ref = self._cf_str(atype)
-            aid = ctypes.c_uint32(0)
-            res = self._create_fn(
-                type_ref, kIOPMAssertionLevelOn, name_ref, ctypes.byref(aid)
-            )
-            if res == 0:
-                success_ids.append(aid.value)
+        try:
+            for atype in assertion_types:
+                type_ref = self._cf_str(atype)
+                aid = ctypes.c_uint32(0)
+                res = self._create_fn(
+                    type_ref, kIOPMAssertionLevelOn, name_ref, ctypes.byref(aid)
+                )
+                self._cf_release(type_ref)
+                if res == 0:
+                    success_ids.append(aid.value)
+        finally:
+            self._cf_release(name_ref)
 
         self._assertion_ids = success_ids
         if success_ids:

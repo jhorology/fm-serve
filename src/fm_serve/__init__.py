@@ -1,6 +1,11 @@
 """fm-serve: always-on Apple Foundation Models (fm serve) with keepalive."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("fm-serve")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "0.0.0"
 
 
 def main() -> None:

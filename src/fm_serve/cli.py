@@ -5,7 +5,36 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 from pathlib import Path
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(
+            f"error: environment variable {name}={raw!r} is not a valid integer",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"error: environment variable {name}={raw!r} is not a valid float",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
 
 def cli_main(argv: list[str] | None = None) -> int:
@@ -21,7 +50,7 @@ def cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("FM_SERVE_PORT", "1976")),
+        default=_env_int("FM_SERVE_PORT", 1976),
         help="Public bind port (default: 1976)",
     )
     parser.add_argument(
@@ -38,7 +67,7 @@ def cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--keepalive-timeout",
         type=float,
-        default=float(os.environ.get("FM_SERVE_KEEPALIVE_TIMEOUT", "3600")),
+        default=_env_float("FM_SERVE_KEEPALIVE_TIMEOUT", 3600.0),
         help="Idle seconds before releasing sleep prevention (default: 3600)",
     )
     parser.add_argument(

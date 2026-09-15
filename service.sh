@@ -26,10 +26,6 @@ LOAD_TIMEOUT="${FM_SERVE_LOAD_TIMEOUT:-45}"
 
 mkdir -p "$LOGS_DIR"
 
-fm_serve() {
-  mise exec -- uv run fm-serve "$@"
-}
-
 is_public() { [[ "$1" == "0.0.0.0" || "$1" == "::" ]]; }
 
 reachable_addrs() {
@@ -104,15 +100,16 @@ cmd_start() {
     return 0
   fi
 
-  if [[ ! -x /usr/bin/fm ]] && ! command -v fm >/dev/null 2>&1; then
-    echo "❌ /usr/bin/fm が見つかりません (Apple Foundation Models CLI が必要です)" >&2
+  local fm_bin="${FM_BIN:-/usr/bin/fm}"
+  if [[ ! -x "$fm_bin" ]] && ! command -v "$fm_bin" >/dev/null 2>&1; then
+    echo "❌ $fm_bin が見つかりません (Apple Foundation Models CLI が必要です)" >&2
     return 1
   fi
 
   rotate_log_if_needed
   echo ">> 起動: ${BIND_HOST}:${DEFAULT_PORT}  (ログ: $LOG_FILE)"
   nohup mise exec -- uv run fm-serve --host "$BIND_HOST" --port "$DEFAULT_PORT" \
-    >>"$LOG_FILE" 2>&1 &
+    --fm-bin "$fm_bin" >>"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
   echo "$BIND_HOST" >"$HOST_FILE"
   wait_for_health
@@ -145,6 +142,12 @@ cmd_stop() {
   leftover=$(lsof -ti tcp:"$DEFAULT_PORT" -sTCP:LISTEN 2>/dev/null || true)
   if [[ -n "$leftover" ]]; then
     kill $leftover 2>/dev/null || true
+  fi
+  # 一時的ポートの fm serve が SIGKILL で孤立した場合の掃除
+  local fm_leftover
+  fm_leftover=$(pgrep -f "fm serve --host" 2>/dev/null || true)
+  if [[ -n "$fm_leftover" ]]; then
+    kill $fm_leftover 2>/dev/null || true
   fi
   rm -f "$PID_FILE" "$HOST_FILE"
   echo "✓ 停止"
@@ -223,6 +226,11 @@ cmd_log() {
 
 cmd_install() {
   mkdir -p "$HOME/Library/LaunchAgents" "$LOGS_DIR"
+  # 既存インスタンスを停止 (ポート競合・KeepAlive クラッシュループ防止)
+  if get_server_pid >/dev/null; then
+    echo ">> 既存インスタンスを停止中..."
+    cmd_stop
+  fi
   # 現在の BIND_HOST / PORT を plist に焼き込む
   cat <<EOF >"$PLIST_PATH"
 <?xml version="1.0" encoding="UTF-8"?>

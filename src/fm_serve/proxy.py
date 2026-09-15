@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 import subprocess
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -15,11 +17,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from rich.console import Console
 
+from fm_serve import __version__
 from fm_serve.keepalive import KeepAliveManager
 
 console = Console()
 
 DEFAULT_PUBLIC_PORT = 1976
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -55,6 +59,20 @@ async def wait_for_url(url: str, timeout: float = 30.0) -> None:
             await asyncio.sleep(0.2)
 
 
+def _stop_fm_process(proc: subprocess.Popen[bytes]) -> None:
+    """fm serve 子プロセスを終了 (terminate → wait → kill)。"""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
 def create_app(
     *,
     backend_base: str,
@@ -85,14 +103,10 @@ def create_app(
                 pass
             keepalive.release()
             await client.aclose()
-            if fm_process is not None and fm_process.poll() is None:
-                fm_process.terminate()
-                try:
-                    fm_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    fm_process.kill()
+            if fm_process is not None:
+                _stop_fm_process(fm_process)
 
-    app = FastAPI(title="fm-serve", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="fm-serve", version=__version__, lifespan=lifespan)
     app.state.keepalive = keepalive
     app.state.backend_base = backend_base
     app.state.fm_process = fm_process
@@ -112,7 +126,8 @@ def create_app(
         try:
             client: httpx.AsyncClient = app.state.http
             resp = await client.get("/health")
-            upstream_ok = resp.status_code == 200
+            # readiness 判定 (wait_for_url) と同じく 4xx (例: /health 未実装) は稼働とみなす
+            upstream_ok = resp.status_code < 500
             try:
                 upstream = resp.json()
             except Exception:
@@ -138,9 +153,7 @@ def create_app(
             target = f"{target}?{request.url.query}"
 
         headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() not in HOP_BY_HOP
+            k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP
         }
         body = await request.body()
 
@@ -153,9 +166,7 @@ def create_app(
         upstream = await client.send(req, stream=True)
 
         resp_headers = {
-            k: v
-            for k, v in upstream.headers.items()
-            if k.lower() not in HOP_BY_HOP
+            k: v for k, v in upstream.headers.items() if k.lower() not in HOP_BY_HOP
         }
 
         async def stream():
@@ -222,14 +233,29 @@ def run_server(
     fm_proc = start_fm_process(host=backend_host, port=backend_port, fm_bin=fm_bin)
     backend_base = f"http://{backend_host}:{backend_port}"
 
+    # Drain fm stdout in the background so the pipe does not fill up.
+    # Must start BEFORE the readiness wait: a large startup log would fill
+    # the pipe buffer and deadlock fm before it becomes healthy.
+    def _drain() -> None:
+        if not fm_proc.stdout:
+            return
+        for line in iter(fm_proc.stdout.readline, b""):
+            try:
+                text = _ANSI_RE.sub("", line.decode(errors="replace")).rstrip()
+            except Exception:
+                continue
+            if text:
+                console.print(f"[dim]fm[/dim] {text}")
+
+    threading.Thread(target=_drain, name="fm-serve-drain", daemon=True).start()
+
     async def _ready() -> None:
         await wait_for_url(f"{backend_base}/health", timeout=45.0)
 
     try:
         asyncio.run(_ready())
     except Exception:
-        if fm_proc.poll() is None:
-            fm_proc.terminate()
+        _stop_fm_process(fm_proc)
         out = b""
         if fm_proc.stdout:
             try:
@@ -245,26 +271,14 @@ def run_server(
         f"public=http://{host}:{port}"
     )
 
-    # Drain fm stdout in background so the pipe does not fill up.
-    def _drain() -> None:
-        if not fm_proc.stdout:
-            return
-        for line in iter(fm_proc.stdout.readline, b""):
-            try:
-                text = line.decode(errors="replace").rstrip()
-            except Exception:
-                continue
-            if text:
-                console.print(f"[dim]fm[/dim] {text}")
-
-    import threading
-
-    threading.Thread(target=_drain, name="fm-serve-drain", daemon=True).start()
-
     app = create_app(
         backend_base=backend_base,
         keepalive_timeout=keepalive_timeout,
         enable_keepalive=enable_keepalive,
         fm_process=fm_proc,
     )
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info")
+    finally:
+        # lifespan が実行されない場合 (例: ポートバインド失敗) の子プロセス掃除
+        _stop_fm_process(fm_proc)
