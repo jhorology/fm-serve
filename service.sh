@@ -23,6 +23,7 @@ DEFAULT_PORT="${FM_SERVE_PORT:-1976}"
 BIND_HOST="${FM_SERVE_HOST:-127.0.0.1}"
 PLIST_LABEL="com.user.fm-serve"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+LAUNCHER_BIN="$HOME/.local/bin/fm-serve"
 LOAD_TIMEOUT="${FM_SERVE_LOAD_TIMEOUT:-45}"
 
 mkdir -p "$LOGS_DIR" "$LOCAL_LOGS_DIR"
@@ -245,12 +246,23 @@ cmd_log() {
 }
 
 cmd_install() {
-  mkdir -p "$HOME/Library/LaunchAgents" "$LOGS_DIR"
+  mkdir -p "$HOME/Library/LaunchAgents" "$LOGS_DIR" "$HOME/.local/bin"
   # 既存インスタンスを停止 (ポート競合・KeepAlive クラッシュループ防止)
   if get_server_pid >/dev/null; then
     echo ">> 既存インスタンスを停止中..."
     cmd_stop
   fi
+
+  # macOS システム設定（ログイン項目）で「bash」ではなく「fm-serve」と表示させるため、
+  # TCC 保護外 (~/.local/bin) に実行スクリプトを配置する
+  cat <<EOF >"$LAUNCHER_BIN"
+#!/bin/bash -l
+set -euo pipefail
+cd "${SCRIPT_DIR}"
+exec mise exec -- uv run fm-serve "\$@"
+EOF
+  chmod +x "$LAUNCHER_BIN"
+
   # 現在の BIND_HOST / PORT を plist に焼き込む
   cat <<EOF >"$PLIST_PATH"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -260,12 +272,16 @@ cmd_install() {
     <key>Label</key>
     <string>${PLIST_LABEL}</string>
     <key>WorkingDirectory</key>
-    <string>${SCRIPT_DIR}</string>
+    <string>${HOME}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-lc</string>
-        <string>cd '${SCRIPT_DIR}' &amp;&amp; exec mise exec -- uv run fm-serve --host ${BIND_HOST} --port ${DEFAULT_PORT}</string>
+        <string>${LAUNCHER_BIN}</string>
+        <string>--host</string>
+        <string>${BIND_HOST}</string>
+        <string>--port</string>
+        <string>${DEFAULT_PORT}</string>
+        <string>--fm-bin</string>
+        <string>${FM_BIN:-/usr/bin/fm}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -297,7 +313,7 @@ EOF
 cmd_uninstall() {
   if [[ -f "$PLIST_PATH" ]]; then
     launchagent_bootout
-    rm -f "$PLIST_PATH"
+    rm -f "$PLIST_PATH" "$LAUNCHER_BIN"
     echo "✓ 自動起動の登録を解除しました。"
   else
     echo "登録されていません。"
