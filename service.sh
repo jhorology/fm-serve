@@ -14,8 +14,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-LOGS_DIR="$SCRIPT_DIR/logs"
+LOGS_DIR="${FM_SERVE_LOGS_DIR:-$HOME/Library/Logs/fm-serve}"
 LOG_FILE="$LOGS_DIR/service.log"
+LOCAL_LOGS_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$SCRIPT_DIR/.service.pid"
 HOST_FILE="$SCRIPT_DIR/.service.host"
 DEFAULT_PORT="${FM_SERVE_PORT:-1976}"
@@ -24,7 +25,11 @@ PLIST_LABEL="com.user.fm-serve"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 LOAD_TIMEOUT="${FM_SERVE_LOAD_TIMEOUT:-45}"
 
-mkdir -p "$LOGS_DIR"
+mkdir -p "$LOGS_DIR" "$LOCAL_LOGS_DIR"
+# ローカルの logs/service.log からも参照できるようにシンボリックリンクを作成
+if [[ ! -e "$LOCAL_LOGS_DIR/service.log" ]]; then
+  ln -sf "$LOG_FILE" "$LOCAL_LOGS_DIR/service.log" 2>/dev/null || true
+fi
 
 is_public() { [[ "$1" == "0.0.0.0" || "$1" == "::" ]]; }
 
@@ -84,8 +89,23 @@ wait_for_health() {
   echo " [完了]"
 }
 
+launchagent_domain() {
+  echo "gui/$(id -u)"
+}
+
 launchagent_loaded() {
-  launchctl list 2>/dev/null | grep -q "$PLIST_LABEL"
+  launchctl print "$(launchagent_domain)/${PLIST_LABEL}" >/dev/null 2>&1 || \
+    launchctl list 2>/dev/null | grep -q "$PLIST_LABEL"
+}
+
+launchagent_bootout() {
+  launchctl bootout "$(launchagent_domain)/${PLIST_LABEL}" 2>/dev/null || \
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+}
+
+launchagent_bootstrap() {
+  launchctl bootstrap "$(launchagent_domain)" "$PLIST_PATH" 2>/dev/null || \
+    launchctl load "$PLIST_PATH"
 }
 
 cmd_start() {
@@ -120,8 +140,8 @@ cmd_stop() {
   local pid
   # LaunchAgent 経由なら一時的に unload して KeepAlive 再起動を防ぐ
   if [[ -f "$PLIST_PATH" ]] && launchagent_loaded; then
-    echo ">> LaunchAgent を一時停止 (unload)..."
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    echo ">> LaunchAgent を一時停止 (bootout)..."
+    launchagent_bootout
   fi
 
   if ! pid=$(get_server_pid); then
@@ -267,8 +287,8 @@ cmd_install() {
 EOF
   echo "✓ LaunchAgent を作成しました: $PLIST_PATH"
   echo "  (Foundation Models はユーザセッション必須のため LaunchDaemon ではなく LaunchAgent)"
-  launchctl unload "$PLIST_PATH" 2>/dev/null || true
-  launchctl load "$PLIST_PATH"
+  launchagent_bootout
+  launchagent_bootstrap
   echo "$BIND_HOST" >"$HOST_FILE"
   wait_for_health || true
   cmd_status
@@ -276,7 +296,7 @@ EOF
 
 cmd_uninstall() {
   if [[ -f "$PLIST_PATH" ]]; then
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    launchagent_bootout
     rm -f "$PLIST_PATH"
     echo "✓ 自動起動の登録を解除しました。"
   else
