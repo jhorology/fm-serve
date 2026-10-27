@@ -163,6 +163,7 @@ class KeepAliveManager:
     def status(self) -> dict[str, Any]:
         """状態の辞書表現を返す (health エンドポイント向け)。"""
         return {
+            "enabled": self.enabled,
             "active": self.is_active,
             "timeout_sec": int(self.timeout_sec),
             "remaining_sec": round(self.remaining_sec, 1),

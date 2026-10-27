@@ -26,6 +26,13 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 LAUNCHER_BIN="$HOME/.local/bin/fm-serve"
 LOAD_TIMEOUT="${FM_SERVE_LOAD_TIMEOUT:-45}"
 TERMINAL_MODE="${FM_SERVE_TERMINAL:-}"
+KEEPALIVE_MODE=""
+BIND_MODE=""
+
+# 明示指定がなければ常駐設定のバインド先を継承する。
+if [[ -z "${FM_SERVE_HOST:-}" && -f "$PLIST_PATH" ]]; then
+  BIND_HOST=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:FM_SERVE_HOST' "$PLIST_PATH" 2>/dev/null || echo "127.0.0.1")
+fi
 
 mkdir -p "$LOGS_DIR" "$LOCAL_LOGS_DIR"
 # ローカルの logs/service.log からも参照できるようにシンボリックリンクを作成
@@ -34,6 +41,29 @@ if [[ ! -e "$LOCAL_LOGS_DIR/service.log" ]]; then
 fi
 
 is_public() { [[ "$1" == "0.0.0.0" || "$1" == "::" ]]; }
+
+client_host() {
+  case "$1" in
+  0.0.0.0) echo "127.0.0.1" ;;
+  ::) echo "[::1]" ;;
+  *:*) echo "[$1]" ;;
+  *) echo "$1" ;;
+  esac
+}
+
+resolve_tailscale_host() {
+  local ip
+  if ! command -v tailscale >/dev/null 2>&1; then
+    echo "❌ tailscale CLI が見つかりません" >&2
+    return 1
+  fi
+  if ! ip=$(tailscale ip -4) || [[ -z "$ip" ]]; then
+    echo "❌ Tailscale IPv4 を取得できません。Tailscale の接続状態を確認してください" >&2
+    return 1
+  fi
+  # 空文字や複数行などをバインド先として渡さない。
+  python3 -c 'import ipaddress, sys; ip = ipaddress.IPv4Address(sys.argv[1]); assert ip in ipaddress.IPv4Network("100.64.0.0/10"); print(ip)' "$ip"
+}
 
 reachable_addrs() {
   local iface ip
@@ -80,7 +110,7 @@ wait_for_health() {
   local timeout="${1:-$LOAD_TIMEOUT}" start
   start=$(date +%s)
   echo -n ">> 起動待機"
-  until curl -sf "http://127.0.0.1:${DEFAULT_PORT}/health" >/dev/null 2>&1; do
+  until curl --noproxy '*' --connect-timeout 2 --max-time 5 -sf "http://$(client_host "$BIND_HOST"):${DEFAULT_PORT}/health" >/dev/null 2>&1; do
     if (($(date +%s) - start >= timeout)); then
       echo " [タイムアウト]  tail -n 40 $LOG_FILE"
       return 1
@@ -117,7 +147,7 @@ cmd_start() {
     running_host=$(cat "$HOST_FILE" 2>/dev/null || echo "127.0.0.1")
     echo "既に稼働中: PID $pid  (${running_host}:${DEFAULT_PORT})"
     if [[ "$running_host" != "$BIND_HOST" ]]; then
-      echo "   ⚠ バインド先が異なります。変更するには: ./service.sh restart $(is_public "$BIND_HOST" && echo --public)"
+      echo "   ⚠ バインド先が異なります。変更するには: FM_SERVE_HOST='$BIND_HOST' ./service.sh restart"
     fi
     return 0
   fi
@@ -131,6 +161,7 @@ cmd_start() {
   rotate_log_if_needed
   local terminal_args=()
   [[ "$TERMINAL_MODE" == 1 ]] && terminal_args+=(--terminal)
+  [[ "$KEEPALIVE_MODE" == 0 ]] && terminal_args+=(--no-keepalive)
   echo ">> 起動: ${BIND_HOST}:${DEFAULT_PORT}  (ログ: $LOG_FILE)"
   nohup mise exec -- uv run fm-serve --host "$BIND_HOST" --port "$DEFAULT_PORT" \
     --fm-bin "$fm_bin" ${terminal_args[@]+"${terminal_args[@]}"} >>"$LOG_FILE" 2>&1 &
@@ -188,7 +219,7 @@ cmd_status() {
   echo "fm-serve 状態  (Apple Foundation Models)"
   if pid=$(get_server_pid); then
     host=$(cat "$HOST_FILE" 2>/dev/null || echo "127.0.0.1")
-    health_json=$(curl -sf "http://127.0.0.1:${DEFAULT_PORT}/health" 2>/dev/null || true)
+    health_json=$(curl --noproxy '*' --connect-timeout 2 --max-time 5 -sf "http://$(client_host "$host"):${DEFAULT_PORT}/health" 2>/dev/null || true)
     if [[ -n "$health_json" ]]; then
       ka_info=$(
         python3 -c "
@@ -197,12 +228,13 @@ d=json.loads(sys.stdin.read())
 k=d.get('keepalive',{})
 act=k.get('active')
 rem=int(k.get('remaining_sec',0)//60)
-print(f'スリープ抑制: {\"有効 (残り \"+str(rem)+\"分)\" if act else \"アイドル解除\"}', end=' / ')
+state='無効' if k.get('enabled') is False else ('有効 (残り '+str(rem)+'分)' if act else 'アイドル解除')
+print('スリープ抑制: '+state, end=' / ')
 pcc=next((m for m in d.get('upstream',{}).get('models',[]) if m.get('name')=='pcc'),{})
 print('PCC: '+('有効' if pcc.get('available') else '利用不可') + (' / '+pcc['reason'] if pcc.get('reason') else ''))
 " <<<"$health_json" 2>/dev/null || echo ""
       )
-      echo "  【稼働中】  PID: $pid  bind ${host}:${DEFAULT_PORT}  http://127.0.0.1:${DEFAULT_PORT}/v1  [$ka_info]"
+      echo "  【稼働中】  PID: $pid  bind ${host}:${DEFAULT_PORT}  http://$(client_host "$host"):${DEFAULT_PORT}/v1  [$ka_info]"
       if is_public "$host"; then
         any_public=1
         while read -r label ip; do
@@ -266,6 +298,10 @@ EOF
   if [[ "$TERMINAL_MODE" == 1 ]]; then
     terminal_plist="<string>--terminal</string>"
   fi
+  local keepalive_plist=""
+  if [[ "$KEEPALIVE_MODE" == 0 ]]; then
+    keepalive_plist="<string>--no-keepalive</string>"
+  fi
 
   # 現在の BIND_HOST / PORT を plist に焼き込む
   cat <<EOF >"$PLIST_PATH"
@@ -287,6 +323,7 @@ EOF
         <string>--fm-bin</string>
         <string>${FM_BIN:-/usr/bin/fm}</string>
         ${terminal_plist}
+        ${keepalive_plist}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -331,21 +368,27 @@ fm-serve — Apple Foundation Models (\`fm serve\`) 常駐サービス
 
 使用法: ./service.sh <command> [options]   (引数なし → status)
 
-  start [--public] [--terminal]  バックグラウンド起動
+  start [--public | --tailscale] [--terminal]  バックグラウンド起動
   stop                 停止
-  restart [--public]   停止 → 起動 (LaunchAgent 登録済なら再 load)
+  restart [--public | --tailscale]   停止 → 起動 (LaunchAgent 登録済なら再 load)
   status               稼働状態 / keepalive / LaunchAgent
   log [-f]             ログ表示 (-f でフォロー)
 
-  install [--public] [--terminal]  ログイン時自動常駐を登録 (LaunchAgent + KeepAlive)
+  install [--public | --tailscale] [--terminal]  ログイン時自動常駐を登録 (LaunchAgent + KeepAlive)
                        登録先: ~/Library/LaunchAgents/${PLIST_LABEL}.plist
   uninstall            自動起動を解除
 
 オプション:
   --public             0.0.0.0 にバインド (LAN / Tailscale、認証なし)
+  --tailscale          Tailscale IPv4 のみにバインド (LAN / localhost では待受しない)
+                       IP 取得失敗時は中止。restart 時もバインド先を継承
+  --localhost          127.0.0.1 のみに戻す
   --terminal           Terminal.app から fm を直接起動して PCC を有効化
                        専用ウィンドウを開く。restart 時も設定を継承
   --no-terminal        通常の子プロセス起動に戻す
+  --no-keepalive       スリープ抑制を無効化 (start / restart / install)
+                       restart 時も設定を継承。launchd の自動再起動は維持
+  --keepalive          スリープ抑制を再び有効化
 
 スリープ抑制 (KeepAlive / IOKit):
   /v1/* など API リクエスト受信のたびにシステムスリープ抑制を 1 時間延長。
@@ -369,18 +412,39 @@ shift || true
 args=()
 for arg in "$@"; do
   case "$arg" in
-  --public) BIND_HOST="0.0.0.0" ;;
+  --public | --tailscale | --localhost)
+    if [[ -n "$BIND_MODE" && "$BIND_MODE" != "$arg" ]]; then
+      echo "❌ --public / --tailscale / --localhost は同時指定できません" >&2
+      exit 1
+    fi
+    BIND_MODE="$arg"
+    ;;
   --terminal) TERMINAL_MODE=1 ;;
   --no-terminal) TERMINAL_MODE=0 ;;
+  --no-keepalive) KEEPALIVE_MODE=0 ;;
+  --keepalive) KEEPALIVE_MODE=1 ;;
   *) args+=("$arg") ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
 
+case "$BIND_MODE" in
+--public) BIND_HOST="0.0.0.0" ;;
+--localhost) BIND_HOST="127.0.0.1" ;;
+--tailscale) BIND_HOST=$(resolve_tailscale_host) ;;
+esac
+
 if [[ -z "$TERMINAL_MODE" ]]; then
   TERMINAL_MODE=0
   if [[ -f "$PLIST_PATH" ]] && /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$PLIST_PATH" 2>/dev/null | grep -q -- '--terminal'; then
     TERMINAL_MODE=1
+  fi
+fi
+
+if [[ -z "$KEEPALIVE_MODE" ]]; then
+  KEEPALIVE_MODE=1
+  if [[ -f "$PLIST_PATH" ]] && /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$PLIST_PATH" 2>/dev/null | grep -q -- '--no-keepalive'; then
+    KEEPALIVE_MODE=0
   fi
 fi
 
