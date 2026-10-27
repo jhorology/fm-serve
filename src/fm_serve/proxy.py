@@ -157,8 +157,11 @@ def create_app(
         if request.url.query:
             target = f"{target}?{request.url.query}"
 
+        # Accept dummy API keys from clients that require one; fm needs no key.
         headers = {
-            k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in HOP_BY_HOP and k.lower() != "authorization"
         }
         body = await request.body()
 
