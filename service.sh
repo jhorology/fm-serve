@@ -278,6 +278,14 @@ cmd_log() {
 }
 
 cmd_install() {
+  # Resolve and prepare dependencies before stopping the running service.
+  # launchd has a minimal PATH and does not read interactive shell setup.
+  mise exec -- uv sync
+  local service_bin="$SCRIPT_DIR/.venv/bin/fm-serve"
+  if [[ ! -x "$service_bin" ]]; then
+    echo "❌ 実行ファイルがありません: $service_bin" >&2
+    return 1
+  fi
   mkdir -p "$HOME/Library/LaunchAgents" "$LOGS_DIR" "$HOME/.local/bin"
   # 既存インスタンスを停止 (ポート競合・KeepAlive クラッシュループ防止)
   if get_server_pid >/dev/null; then
@@ -288,10 +296,10 @@ cmd_install() {
   # macOS システム設定（ログイン項目）で「bash」ではなく「fm-serve」と表示させるため、
   # TCC 保護外 (~/.local/bin) に実行スクリプトを配置する
   cat <<EOF >"$LAUNCHER_BIN"
-#!/bin/bash -l
+#!/bin/bash
 set -euo pipefail
 cd "${SCRIPT_DIR}"
-exec mise exec -- uv run fm-serve "\$@"
+exec "${service_bin}" "\$@"
 EOF
   chmod +x "$LAUNCHER_BIN"
   local terminal_plist=""
@@ -348,8 +356,15 @@ EOF
   launchagent_bootout
   launchagent_bootstrap
   echo "$BIND_HOST" >"$HOST_FILE"
-  wait_for_health || true
+  local health_status=0
+  wait_for_health || health_status=$?
+  if ((health_status)); then
+    echo "❌ 自動起動は登録済みですが起動確認に失敗しました。ログ: $LOG_FILE" >&2
+    echo "  --terminal 使用時は macOS のオートメーション権限も確認してください。" >&2
+    tail -n 15 "$LOG_FILE" >&2
+  fi
   cmd_status
+  return "$health_status"
 }
 
 cmd_uninstall() {

@@ -38,3 +38,12 @@ def test_terminal_automation_denial_is_reported(monkeypatch):
     monkeypatch.setattr(subprocess, "run", denied)
     with pytest.raises(RuntimeError, match="Not authorized"):
         start_terminal_fm(host="127.0.0.1", port=1977, fm_bin="/usr/bin/fm")
+
+
+def test_terminal_automation_timeout_has_permission_guidance(monkeypatch):
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 30)
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    with pytest.raises(RuntimeError, match="Privacy & Security > Automation"):
+        start_terminal_fm(host="127.0.0.1", port=1977, fm_bin="/usr/bin/fm")

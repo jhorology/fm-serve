@@ -36,7 +36,9 @@ tailscale ip -4  # Tailscale CLI が利用でき、IPv4 が取得できること
 ./service.sh status
 ```
 
-`install` は既存サービスを再起動して設定を保存します。以後はログイン時に自動起動し、
+`install` は依存関係を同期してから既存サービスを再起動し、設定を保存します。
+LaunchAgent は `.venv/bin/fm-serve` の絶対パスで起動し、ログイン時の PATH に依存しません。
+リポジトリや `.venv` の配置を変更した場合は再度 `install` してください。以後はログイン時に自動起動し、
 `./service.sh restart` でもバインド先・Terminal 起動・スリープ抑制の設定を継承します。
 `--no-keepalive` 使用時は、Mac 自体のスリープ設定を OS 側で管理してください。
 
@@ -224,5 +226,8 @@ Tailscale 限定時は `100.x.x.x:1976` のような Tailscale IPv4 が表示さ
 | Tailscale IP が変わった | `./service.sh install --tailscale` で保存済み IP を更新 |
 | localhost から接続できない | Tailscale 限定時はサーバー自身も Tailscale IP を使用 |
 | 別の端末から接続できない | 接続元の Tailscale 接続・アクセス制御と、サーバーの `status` を確認 |
+| 自動起動ログに `mise: not found` | 修正版で `./service.sh install` を再実行し、起動スクリプトを更新 |
+| Terminal 制御がタイムアウト / `-1743` | 権限ダイアログと「システム設定 → プライバシーとセキュリティ → オートメーション」を確認して再試行。手動起動の許可だけでは LaunchAgent 経由の確認を代替できない |
+| 再起動後に起動しない | ユーザーの GUI ログイン後に `status` とログを確認。LaunchAgent はログイン前には起動しない |
 | PCC が利用不可 | `install --terminal` と `/health` の `upstream.models` を確認 |
 | keepalive 無効化を確認したい | `/health` の `keepalive.enabled` と `keepalive.active` がともに `false` か確認 |

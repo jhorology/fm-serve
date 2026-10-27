@@ -83,10 +83,16 @@ def start_terminal_fm(*, host: str, port: int, fm_bin: str) -> TerminalFmProcess
             'return id of fmWindow\n'
             'end repeat\nend tell'
         )
-        result = subprocess.run(
-            ["/usr/bin/osascript", "-e", script],
-            capture_output=True, text=True, timeout=30,
-        )
+        try:
+            result = subprocess.run(
+                ["/usr/bin/osascript", "-e", script],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "Terminal.app control timed out. Check the macOS permission dialog "
+                "and System Settings > Privacy & Security > Automation, then retry."
+            ) from exc
         if result.returncode:
             raise RuntimeError(f"Terminal.app launch failed: {result.stderr.strip()}")
         window_id = int(result.stdout.strip())
