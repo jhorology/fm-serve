@@ -19,6 +19,9 @@ from rich.console import Console
 
 from fm_serve import __version__
 from fm_serve.keepalive import KeepAliveManager
+from fm_serve.terminal import TerminalFmProcess, start_terminal_fm
+
+FmProcess = subprocess.Popen[bytes] | TerminalFmProcess
 
 console = Console()
 
@@ -59,7 +62,7 @@ async def wait_for_url(url: str, timeout: float = 30.0) -> None:
             await asyncio.sleep(0.2)
 
 
-def _stop_fm_process(proc: subprocess.Popen[bytes]) -> None:
+def _stop_fm_process(proc: FmProcess) -> None:
     """fm serve 子プロセスを終了 (terminate → wait → kill)。"""
     if proc.poll() is None:
         proc.terminate()
@@ -71,6 +74,8 @@ def _stop_fm_process(proc: subprocess.Popen[bytes]) -> None:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+    if isinstance(proc, TerminalFmProcess):
+        proc.close_window()
 
 
 def create_app(
@@ -78,7 +83,7 @@ def create_app(
     backend_base: str,
     keepalive_timeout: float = 3600.0,
     enable_keepalive: bool = True,
-    fm_process: subprocess.Popen[bytes] | None = None,
+    fm_process: FmProcess | None = None,
 ) -> FastAPI:
     keepalive = KeepAliveManager(
         timeout_sec=keepalive_timeout, enabled=enable_keepalive
@@ -225,12 +230,19 @@ def run_server(
     fm_bin: str = "/usr/bin/fm",
     keepalive_timeout: float = 3600.0,
     enable_keepalive: bool = True,
+    terminal: bool = False,
 ) -> None:
     backend_port = backend_port or find_free_port(backend_host)
     if backend_port == port and backend_host == host:
         raise ValueError("backend_port must differ from public port")
 
-    fm_proc = start_fm_process(host=backend_host, port=backend_port, fm_bin=fm_bin)
+    if terminal:
+        console.print("[cyan]>> Terminal.app 経由で fm serve を起動 (PCC)[/cyan]")
+        fm_proc: FmProcess = start_terminal_fm(
+            host=backend_host, port=backend_port, fm_bin=fm_bin
+        )
+    else:
+        fm_proc = start_fm_process(host=backend_host, port=backend_port, fm_bin=fm_bin)
     backend_base = f"http://{backend_host}:{backend_port}"
 
     # Drain fm stdout in the background so the pipe does not fill up.
@@ -277,8 +289,22 @@ def run_server(
         enable_keepalive=enable_keepalive,
         fm_process=fm_proc,
     )
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="info"))
+    monitor_stop = threading.Event()
+
+    def _monitor_backend() -> None:
+        while not monitor_stop.wait(1):
+            if fm_proc.poll() is not None:
+                console.print("[red]fm serve が終了しました。プロキシを停止します。[/red]")
+                server.should_exit = True  # launchd KeepAlive restarts both processes.
+                return
+
+    monitor = threading.Thread(target=_monitor_backend, daemon=True)
+    monitor.start()
     try:
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        server.run()
     finally:
+        monitor_stop.set()
+        monitor.join(timeout=2)
         # lifespan が実行されない場合 (例: ポートバインド失敗) の子プロセス掃除
         _stop_fm_process(fm_proc)

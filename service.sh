@@ -25,6 +25,7 @@ PLIST_LABEL="com.user.fm-serve"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 LAUNCHER_BIN="$HOME/.local/bin/fm-serve"
 LOAD_TIMEOUT="${FM_SERVE_LOAD_TIMEOUT:-45}"
+TERMINAL_MODE="${FM_SERVE_TERMINAL:-}"
 
 mkdir -p "$LOGS_DIR" "$LOCAL_LOGS_DIR"
 # ローカルの logs/service.log からも参照できるようにシンボリックリンクを作成
@@ -128,9 +129,11 @@ cmd_start() {
   fi
 
   rotate_log_if_needed
+  local terminal_args=()
+  [[ "$TERMINAL_MODE" == 1 ]] && terminal_args+=(--terminal)
   echo ">> 起動: ${BIND_HOST}:${DEFAULT_PORT}  (ログ: $LOG_FILE)"
   nohup mise exec -- uv run fm-serve --host "$BIND_HOST" --port "$DEFAULT_PORT" \
-    --fm-bin "$fm_bin" >>"$LOG_FILE" 2>&1 &
+    --fm-bin "$fm_bin" ${terminal_args[@]+"${terminal_args[@]}"} >>"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
   echo "$BIND_HOST" >"$HOST_FILE"
   wait_for_health
@@ -164,12 +167,7 @@ cmd_stop() {
   if [[ -n "$leftover" ]]; then
     kill $leftover 2>/dev/null || true
   fi
-  # 一時的ポートの fm serve が SIGKILL で孤立した場合の掃除
-  local fm_leftover
-  fm_leftover=$(pgrep -f "fm serve --host" 2>/dev/null || true)
-  if [[ -n "$fm_leftover" ]]; then
-    kill $fm_leftover 2>/dev/null || true
-  fi
+  # 他の Terminal / サービスが所有する fm serve は停止しない。
   rm -f "$PID_FILE" "$HOST_FILE"
   echo "✓ 停止"
 }
@@ -199,7 +197,9 @@ d=json.loads(sys.stdin.read())
 k=d.get('keepalive',{})
 act=k.get('active')
 rem=int(k.get('remaining_sec',0)//60)
-print(f'スリープ抑制: {\"有効 (残り \"+str(rem)+\"分)\" if act else \"アイドル解除\"}')
+print(f'スリープ抑制: {\"有効 (残り \"+str(rem)+\"分)\" if act else \"アイドル解除\"}', end=' / ')
+pcc=next((m for m in d.get('upstream',{}).get('models',[]) if m.get('name')=='pcc'),{})
+print('PCC: '+('有効' if pcc.get('available') else '利用不可') + (' / '+pcc['reason'] if pcc.get('reason') else ''))
 " <<<"$health_json" 2>/dev/null || echo ""
       )
       echo "  【稼働中】  PID: $pid  bind ${host}:${DEFAULT_PORT}  http://127.0.0.1:${DEFAULT_PORT}/v1  [$ka_info]"
@@ -262,6 +262,10 @@ cd "${SCRIPT_DIR}"
 exec mise exec -- uv run fm-serve "\$@"
 EOF
   chmod +x "$LAUNCHER_BIN"
+  local terminal_plist=""
+  if [[ "$TERMINAL_MODE" == 1 ]]; then
+    terminal_plist="<string>--terminal</string>"
+  fi
 
   # 現在の BIND_HOST / PORT を plist に焼き込む
   cat <<EOF >"$PLIST_PATH"
@@ -282,6 +286,7 @@ EOF
         <string>${DEFAULT_PORT}</string>
         <string>--fm-bin</string>
         <string>${FM_BIN:-/usr/bin/fm}</string>
+        ${terminal_plist}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -326,18 +331,21 @@ fm-serve — Apple Foundation Models (\`fm serve\`) 常駐サービス
 
 使用法: ./service.sh <command> [options]   (引数なし → status)
 
-  start [--public]     バックグラウンド起動
+  start [--public] [--terminal]  バックグラウンド起動
   stop                 停止
   restart [--public]   停止 → 起動 (LaunchAgent 登録済なら再 load)
   status               稼働状態 / keepalive / LaunchAgent
   log [-f]             ログ表示 (-f でフォロー)
 
-  install [--public]   ログイン時自動常駐を登録 (LaunchAgent + KeepAlive)
+  install [--public] [--terminal]  ログイン時自動常駐を登録 (LaunchAgent + KeepAlive)
                        登録先: ~/Library/LaunchAgents/${PLIST_LABEL}.plist
   uninstall            自動起動を解除
 
 オプション:
   --public             0.0.0.0 にバインド (LAN / Tailscale、認証なし)
+  --terminal           Terminal.app から fm を直接起動して PCC を有効化
+                       専用ウィンドウを開く。restart 時も設定を継承
+  --no-terminal        通常の子プロセス起動に戻す
 
 スリープ抑制 (KeepAlive / IOKit):
   /v1/* など API リクエスト受信のたびにシステムスリープ抑制を 1 時間延長。
@@ -362,10 +370,19 @@ args=()
 for arg in "$@"; do
   case "$arg" in
   --public) BIND_HOST="0.0.0.0" ;;
+  --terminal) TERMINAL_MODE=1 ;;
+  --no-terminal) TERMINAL_MODE=0 ;;
   *) args+=("$arg") ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
+
+if [[ -z "$TERMINAL_MODE" ]]; then
+  TERMINAL_MODE=0
+  if [[ -f "$PLIST_PATH" ]] && /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$PLIST_PATH" 2>/dev/null | grep -q -- '--terminal'; then
+    TERMINAL_MODE=1
+  fi
+fi
 
 case "$action" in
 start) cmd_start ;;

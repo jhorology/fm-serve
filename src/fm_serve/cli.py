@@ -76,6 +76,11 @@ def cli_main(argv: list[str] | None = None) -> int:
         help="Disable macOS sleep prevention",
     )
     parser.add_argument(
+        "--terminal",
+        action="store_true",
+        help="Start fm directly in Terminal.app to enable PCC (opens a window)",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Verify fm availability and exit",
@@ -100,5 +105,6 @@ def cli_main(argv: list[str] | None = None) -> int:
         fm_bin=args.fm_bin,
         keepalive_timeout=args.keepalive_timeout,
         enable_keepalive=not args.no_keepalive,
+        terminal=args.terminal,
     )
     return 0
