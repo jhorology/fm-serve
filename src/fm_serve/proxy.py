@@ -15,6 +15,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from rich.console import Console
 
 from fm_serve import __version__
@@ -26,6 +27,8 @@ FmProcess = subprocess.Popen[bytes] | TerminalFmProcess
 console = Console()
 
 DEFAULT_PUBLIC_PORT = 1976
+PAGE_ASSIST_ORIGIN = "chrome-extension://jfgfiigpkhlkbnfnbobbkinehhfdhndo"
+BROWSER_CONTEXT_HEADERS = {"origin", "referer", "sec-fetch-site"}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 HOP_BY_HOP = {
     "connection",
@@ -117,6 +120,24 @@ def create_app(
     app.state.fm_process = fm_process
 
     @app.middleware("http")
+    async def check_browser_origin(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if origin is not None and origin != PAGE_ASSIST_ORIGIN:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Cross-site requests are not allowed."},
+            )
+        return await call_next(request)
+
+    # Only the official Chrome extension can use browser cross-origin access.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[PAGE_ASSIST_ORIGIN],
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
     async def keepalive_middleware(request: Request, call_next):
         # ヘルスチェック以外のリクエストで keepalive (スリープ抑制) を更新
         if request.url.path not in ("/", "/health"):
@@ -163,6 +184,13 @@ def create_app(
             for k, v in request.headers.items()
             if k.lower() not in HOP_BY_HOP and k.lower() != "authorization"
         }
+        # fm rejects browser context headers even for a trusted extension.
+        # Preserve them for all other requests so its CSRF checks remain active.
+        if request.headers.get("origin") == PAGE_ASSIST_ORIGIN:
+            headers = {
+                k: v for k, v in headers.items()
+                if k.lower() not in BROWSER_CONTEXT_HEADERS
+            }
         body = await request.body()
 
         req = client.build_request(

@@ -168,6 +168,20 @@ OpenAI 互換クライアントの Base URL は、この URL に `/v1` を付け
 API キーは照合しません。`Authorization` ヘッダーはプロキシで取り除き、
 `fm` には転送しません。キーなしのリクエストも引き続き利用できます。
 
+Chrome の公式 Page Assist 拡張からの接続にも対応しています。
+OpenAI 互換接続の Base URL を `http://<サーバーの Tailscale IPv4>:1976/v1`、
+API キーを任意の空でない文字列、モデルを `system` または `pcc` に設定します。
+拡張 Origin `chrome-extension://jfgfiigpkhlkbnfnbobbkinehhfdhndo` のみ CORS を許可し、
+そのリクエストの `Origin` / `Referer` / `Sec-Fetch-Site` を除去して `fm` に転送します。
+他の Origin は拒否します。開発版など拡張 ID が異なるものは許可しません。
+
+この Origin 許可はブラウザからのアクセスを制限するためのもので、認証ではありません。
+curl などのクライアントは Origin を任意に指定でき、Origin なしの API アクセスも可能です。
+上記の API キーも照合しないため、API に接続できる端末はモデルを利用できます。
+外部端末から利用する場合は `--tailscale` で公開し、Tailscale のアクセス制御で
+接続できる端末・ユーザーを限定してください。インターネットへの直接公開は避け、
+必要な場合は前段に認証付きゲートウェイを配置してください。
+
 ### エンドポイント
 
 | エンドポイント | 内容 |
