@@ -211,8 +211,3 @@ Tailscale 限定時は `100.x.x.x:1976` のような Tailscale IPv4 が表示さ
 | 別の端末から接続できない | 接続元の Tailscale 接続・アクセス制御と、サーバーの `status` を確認 |
 | PCC が利用不可 | `install --terminal` と `/health` の `upstream.models` を確認 |
 | keepalive 無効化を確認したい | `/health` の `keepalive.enabled` と `keepalive.active` がともに `false` か確認 |
-
-## 参考
-
-常駐・keepalive の設計は `~/Documents/Sources/m4max-llm` と
-`~/Documents/Sources/m2air-llm` (LaunchAgent) を踏襲しています。
